@@ -7,8 +7,8 @@ type SubmissionData = {
   name: string;
   company: string;
   email: string;
-  numberOfVacancies: number;
-  expectedHiringTimeline: string;
+  numberOfVacancies: number | null;
+  expectedHiringTimeline: string | null;
   notes: string;
 };
 
@@ -16,8 +16,6 @@ const REQUIRED_FIELDS = [
   'Name',
   'Company Name',
   'Email',
-  'NumberofVacancies',
-  'Expected Hiring Timeline',
   'Notes',
 ] as const;
 
@@ -39,25 +37,64 @@ async function ensureSchema(env: Env) {
       name TEXT NOT NULL,
       company TEXT NOT NULL,
       email TEXT NOT NULL,
-      number_of_vacancies INTEGER NOT NULL,
-      expected_hiring_timeline TEXT NOT NULL,
+      number_of_vacancies INTEGER,
+      expected_hiring_timeline TEXT,
       notes TEXT NOT NULL,
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     )
   `).run();
 
-  const migrationSql = [
-    'ALTER TABLE submissions ADD COLUMN number_of_vacancies INTEGER',
-    'ALTER TABLE submissions ADD COLUMN expected_hiring_timeline TEXT',
-  ];
+  const columnInfo = await env.DB.prepare('PRAGMA table_info(submissions)').all<{ name: string; notnull: number }>();
+  const columns = columnInfo.results;
+  const columnNames = new Set(columns.map((column) => column.name));
+  const numberVacancyColumn = columns.find((column) => column.name === 'number_of_vacancies');
+  const expectedTimelineColumn = columns.find((column) => column.name === 'expected_hiring_timeline');
+  const needsOptionalMigration =
+    (columnNames.has('number_of_vacancies') && numberVacancyColumn?.notnull === 1) ||
+    (columnNames.has('expected_hiring_timeline') && expectedTimelineColumn?.notnull === 1);
 
-  for (const statement of migrationSql) {
-    try {
-      await env.DB.prepare(statement).run();
-    } catch {
-      // Ignore migration errors for existing columns.
-    }
+  if (!needsOptionalMigration) {
+    return;
   }
+
+  await env.DB.prepare('ALTER TABLE submissions RENAME TO submissions_old').run();
+  await env.DB.prepare(`
+    CREATE TABLE submissions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      company TEXT NOT NULL,
+      email TEXT NOT NULL,
+      number_of_vacancies INTEGER,
+      expected_hiring_timeline TEXT,
+      notes TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )
+  `).run();
+
+  await env.DB.prepare(`
+    INSERT INTO submissions (
+      id,
+      name,
+      company,
+      email,
+      number_of_vacancies,
+      expected_hiring_timeline,
+      notes,
+      created_at
+    )
+    SELECT
+      id,
+      name,
+      company,
+      email,
+      number_of_vacancies,
+      expected_hiring_timeline,
+      notes,
+      created_at
+    FROM submissions_old
+  `).run();
+
+  await env.DB.prepare('DROP TABLE submissions_old').run();
 }
 
 async function verifyTurnstile(token: string, secretKey: string): Promise<boolean> {
@@ -151,15 +188,16 @@ function parseValidatedSubmission(body: Record<string, unknown>): { data: Submis
   const name = fieldMap['Name'];
   const company = fieldMap['Company Name'];
   const email = fieldMap.Email;
-  const numberOfVacancies = Number(fieldMap.NumberofVacancies);
-  const expectedHiringTimeline = fieldMap['Expected Hiring Timeline'];
+  const rawNumberOfVacancies = fieldMap.NumberofVacancies;
+  const numberOfVacancies = rawNumberOfVacancies ? Number(rawNumberOfVacancies) : null;
+  const expectedHiringTimeline = fieldMap['Expected Hiring Timeline'] || null;
   const notes = fieldMap.Notes;
 
   if (email && !validateEmail(email)) {
     errors.push('Email must be a valid email address.');
   }
 
-  if (!Number.isInteger(numberOfVacancies) || numberOfVacancies <= 0) {
+  if (rawNumberOfVacancies && (!Number.isInteger(numberOfVacancies) || (numberOfVacancies ?? 0) <= 0)) {
     errors.push('Number of Vacancies must be a positive integer.');
   }
 
@@ -169,7 +207,7 @@ function parseValidatedSubmission(body: Record<string, unknown>): { data: Submis
         name,
         company,
         email,
-        numberOfVacancies: Number.isInteger(numberOfVacancies) ? numberOfVacancies : 0,
+        numberOfVacancies: Number.isInteger(numberOfVacancies) ? numberOfVacancies : null,
         expectedHiringTimeline,
         notes,
       },
@@ -182,7 +220,7 @@ function parseValidatedSubmission(body: Record<string, unknown>): { data: Submis
       name,
       company,
       email,
-      numberOfVacancies,
+      numberOfVacancies: Number.isInteger(numberOfVacancies) ? numberOfVacancies : null,
       expectedHiringTimeline,
       notes,
     },
@@ -227,8 +265,16 @@ export default {
       });
     }
 
-    if (request.method === 'GET' && url.pathname === '/health') {
-      return json(200, { ok: true, service: 'mbtedge-service' });
+    if ((request.method === 'GET' || request.method === 'HEAD') && url.pathname === '/health') {
+      return new Response(null, {
+        status: 200,
+        headers: {
+          'content-type': 'application/json; charset=utf-8',
+          'Access-Control-Allow-Origin': '*',
+          'Access-Control-Allow-Methods': 'GET, HEAD, POST, OPTIONS',
+          'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+        },
+      });
     }
 
     if (request.method !== 'POST') {

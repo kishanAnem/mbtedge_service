@@ -3,8 +3,8 @@ CREATE TABLE IF NOT EXISTS submissions (
   name TEXT NOT NULL,
   company TEXT NOT NULL,
   email TEXT NOT NULL,
-  number_of_vacancies INTEGER NOT NULL,
-  expected_hiring_timeline TEXT NOT NULL,
+  number_of_vacancies INTEGER,
+  expected_hiring_timeline TEXT,
   notes TEXT NOT NULL,
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
